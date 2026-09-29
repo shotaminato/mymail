@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/mail-core"]
+
+# Keep release binaries small for a desktop mail client.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
