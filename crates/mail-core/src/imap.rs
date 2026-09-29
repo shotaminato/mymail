@@ -233,3 +233,97 @@ pub(crate) async fn fetch_raw(
 pub(crate) async fn logout(session: &mut Session<ImapIo>) {
     let _ = session.logout().await;
 }
+
+fn uid_set(uids: &[u32]) -> Result<String> {
+    if uids.is_empty() {
+        return Err(Error::InvalidConfig("UID list is empty".into()));
+    }
+    Ok(uids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+fn flags_query(op: &str, flags: &[crate::ImapFlag]) -> String {
+    let tokens: Vec<&str> = flags.iter().map(|f| f.as_imap_token()).collect();
+    format!("{op} ({})", tokens.join(" "))
+}
+
+/// CREATE a mailbox. Used today for tests; later also for a hidden rules folder.
+pub(crate) async fn create_folder(session: &mut Session<ImapIo>, name: &str) -> Result<()> {
+    session
+        .create(name)
+        .await
+        .map_err(|e| Error::Imap(e.to_string()))
+}
+
+/// UID STORE +FLAGS / -FLAGS. Callers must pass a selected mailbox via `folder`.
+pub(crate) async fn store_flags(
+    session: &mut Session<ImapIo>,
+    folder: &str,
+    uids: &[u32],
+    add: &[crate::ImapFlag],
+    remove: &[crate::ImapFlag],
+) -> Result<()> {
+    session
+        .select(folder)
+        .await
+        .map_err(|e| Error::Imap(e.to_string()))?;
+    let set = uid_set(uids)?;
+    if !add.is_empty() {
+        let stream = session
+            .uid_store(&set, flags_query("+FLAGS.SILENT", add))
+            .await
+            .map_err(|e| Error::Imap(e.to_string()))?;
+        let _: Vec<_> = stream
+            .try_collect()
+            .await
+            .map_err(|e| Error::Imap(e.to_string()))?;
+    }
+    if !remove.is_empty() {
+        let stream = session
+            .uid_store(&set, flags_query("-FLAGS.SILENT", remove))
+            .await
+            .map_err(|e| Error::Imap(e.to_string()))?;
+        let _: Vec<_> = stream
+            .try_collect()
+            .await
+            .map_err(|e| Error::Imap(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// UID MOVE, with COPY+\\Deleted+EXPUNGE fallback when MOVE is unavailable.
+pub(crate) async fn move_uids(
+    session: &mut Session<ImapIo>,
+    from: &str,
+    uids: &[u32],
+    to: &str,
+) -> Result<()> {
+    session
+        .select(from)
+        .await
+        .map_err(|e| Error::Imap(e.to_string()))?;
+    let set = uid_set(uids)?;
+    if session.uid_mv(&set, to).await.is_ok() {
+        return Ok(());
+    }
+    session
+        .uid_copy(&set, to)
+        .await
+        .map_err(|e| Error::Imap(e.to_string()))?;
+    store_flags(session, from, uids, &[crate::ImapFlag::Deleted], &[]).await?;
+    let stream = session
+        .uid_expunge(&set)
+        .await
+        .map_err(|e| Error::Imap(e.to_string()))?;
+    let expunge_result: Result<Vec<_>> = stream
+        .try_collect()
+        .await
+        .map_err(|e| Error::Imap(e.to_string()));
+    if expunge_result.is_err() {
+        let _ = session.expunge().await;
+    }
+    Ok(())
+}

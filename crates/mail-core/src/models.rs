@@ -60,6 +60,25 @@ pub struct Folder {
     pub delimiter: Option<String>,
 }
 
+/// IMAP flags a later rules engine can use for actions like mark-read / star.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImapFlag {
+    Seen,
+    Flagged,
+    Deleted,
+}
+
+impl ImapFlag {
+    pub fn as_imap_token(self) -> &'static str {
+        match self {
+            Self::Seen => "\\Seen",
+            Self::Flagged => "\\Flagged",
+            Self::Deleted => "\\Deleted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSummary {

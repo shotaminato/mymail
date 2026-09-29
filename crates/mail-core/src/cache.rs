@@ -199,6 +199,22 @@ impl Cache {
         Ok(())
     }
 
+    pub fn delete_message(&self, account_id: &str, folder: &str, uid: u32) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE account_id = ?1 AND folder = ?2 AND uid = ?3",
+            params![account_id, folder, uid],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_unseen(&self, account_id: &str, folder: &str, uid: u32, unseen: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET unseen = ?1 WHERE account_id = ?2 AND folder = ?3 AND uid = ?4",
+            params![unseen as i64, account_id, folder, uid],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_summary(
         &self,
         account_id: &str,

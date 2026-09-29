@@ -7,7 +7,7 @@ use crate::cache::Cache;
 use crate::credentials::{require_password, CredentialStore, FileCredentialStore};
 use crate::imap;
 use crate::mime::parse_rfc822;
-use crate::models::{Account, Folder, MessageBody, MessageSummary, NewAccount};
+use crate::models::{Account, Folder, ImapFlag, MessageBody, MessageSummary, NewAccount};
 use crate::{Error, Result};
 
 pub struct MailService {
@@ -141,5 +141,67 @@ impl MailService {
 
     pub fn search(&self, account_id: &str, query: &str) -> Result<Vec<MessageSummary>> {
         self.cache.lock().unwrap().search(account_id, query)
+    }
+
+    /// IMAP CREATE. Later used for a hidden folder that stores cross-device rules JSON.
+    pub async fn create_folder(&self, account_id: &str, folder: &str) -> Result<()> {
+        let account = self.cache.lock().unwrap().get_account(account_id)?;
+        let password = require_password(self.creds.as_ref(), account_id)?;
+        let mut session = imap::connect(&account, &password).await?;
+        let result = imap::create_folder(&mut session, folder).await;
+        imap::logout(&mut session).await;
+        result
+    }
+
+    /// Mark/unmark IMAP flags (Seen, Flagged, Deleted). A rules engine can call this
+    /// for mark-read / star without talking to the protocol layer directly.
+    pub async fn set_flags(
+        &self,
+        account_id: &str,
+        folder: &str,
+        uids: &[u32],
+        add: &[ImapFlag],
+        remove: &[ImapFlag],
+    ) -> Result<()> {
+        let account = self.cache.lock().unwrap().get_account(account_id)?;
+        let password = require_password(self.creds.as_ref(), account_id)?;
+        let mut session = imap::connect(&account, &password).await?;
+        let result = imap::store_flags(&mut session, folder, uids, add, remove).await;
+        imap::logout(&mut session).await;
+        result?;
+
+        let cache = self.cache.lock().unwrap();
+        for uid in uids {
+            if add.contains(&ImapFlag::Seen) {
+                cache.set_unseen(account_id, folder, *uid, false)?;
+            }
+            if remove.contains(&ImapFlag::Seen) {
+                cache.set_unseen(account_id, folder, *uid, true)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// UID MOVE (COPY+delete fallback). Destination UIDs change; caller should sync
+    /// the target folder. Intended as the "move to folder" action for a rules engine.
+    pub async fn move_messages(
+        &self,
+        account_id: &str,
+        from: &str,
+        uids: &[u32],
+        to: &str,
+    ) -> Result<()> {
+        let account = self.cache.lock().unwrap().get_account(account_id)?;
+        let password = require_password(self.creds.as_ref(), account_id)?;
+        let mut session = imap::connect(&account, &password).await?;
+        let result = imap::move_uids(&mut session, from, uids, to).await;
+        imap::logout(&mut session).await;
+        result?;
+
+        let cache = self.cache.lock().unwrap();
+        for uid in uids {
+            cache.delete_message(account_id, from, *uid)?;
+        }
+        Ok(())
     }
 }

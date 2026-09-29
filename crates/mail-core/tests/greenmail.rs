@@ -16,8 +16,9 @@ use std::time::Duration;
 use lettre::message::{header, MultiPart, SinglePart};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_core::credentials::MemoryCredentialStore;
-use mail_core::models::{NewAccount, TlsMode};
+use mail_core::models::{ImapFlag, NewAccount, TlsMode};
 use mail_core::{Cache, MailService};
+use serial_test::serial;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
@@ -124,6 +125,7 @@ async fn make_service() -> MailService {
 }
 
 #[tokio::test]
+#[serial]
 async fn connect_list_folders_and_read_bodies() {
     let service = make_service().await;
     let account = service
@@ -212,6 +214,7 @@ async fn connect_list_folders_and_read_bodies() {
 }
 
 #[tokio::test]
+#[serial]
 async fn rejects_bad_password() {
     wait_for_greenmail().await;
     let cache = Cache::open_in_memory().unwrap();
@@ -234,5 +237,76 @@ async fn rejects_bad_password() {
     assert!(
         msg.contains("auth") || msg.contains("IMAP") || msg.contains("login"),
         "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn move_and_flag_messages() {
+    let service = make_service().await;
+    let account = service
+        .add_account(
+            NewAccount {
+                display_name: "GreenMail".into(),
+                imap_host: host(),
+                imap_port: imap_port(),
+                tls_mode: TlsMode::None,
+                username: username(),
+                accept_invalid_certs: true,
+            },
+            password(),
+        )
+        .await
+        .expect("add account");
+
+    let dest = format!("Archive-{}", account.id.split('-').next().unwrap_or("x"));
+    service
+        .create_folder(&account.id, &dest)
+        .await
+        .unwrap_or_else(|e| panic!("create {dest}: {e}"));
+
+    let messages = service
+        .sync_folder(&account.id, "INBOX")
+        .await
+        .expect("sync INBOX");
+    assert!(!messages.is_empty(), "need mail to move");
+    let uid = messages[0].uid;
+
+    service
+        .set_flags(
+            &account.id,
+            "INBOX",
+            &[uid],
+            &[ImapFlag::Seen, ImapFlag::Flagged],
+            &[],
+        )
+        .await
+        .expect("set flags");
+    let after_flag = service.list_messages(&account.id, "INBOX").unwrap();
+    let marked = after_flag
+        .iter()
+        .find(|m| m.uid == uid)
+        .expect("uid in cache");
+    assert!(!marked.unseen, "\\Seen should clear unseen in the cache");
+
+    service
+        .move_messages(&account.id, "INBOX", &[uid], &dest)
+        .await
+        .expect("move");
+    let inbox_after = service
+        .sync_folder(&account.id, "INBOX")
+        .await
+        .expect("resync INBOX");
+    assert!(
+        inbox_after.iter().all(|m| m.uid != uid),
+        "moved UID should leave INBOX"
+    );
+    let archive = service
+        .sync_folder(&account.id, &dest)
+        .await
+        .expect("sync archive");
+    assert!(
+        !archive.is_empty(),
+        "destination folder should contain the moved message"
     );
 }
